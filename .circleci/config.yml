@@ -27,8 +27,15 @@ jobs:
       - run:
           name: Build and Push Docker Image
           command: |
-              docker build -t us-central1-docker.pkg.dev/$GOOGLE_PROJECT_ID/circle-ci-app/circle-ci-app:latest .
-              docker push us-central1-docker.pkg.dev/$GOOGLE_PROJECT_ID/circle-ci-app/circle-ci-app:latest
+              command: |
+                if [ -z "$GOOGLE_PROJECT_ID" ]; then
+              echo "ERROR: GOOGLE_PROJECT_ID environment variable is not set."
+              exit 1
+                fi
+              IMAGE_TAG="us-central1-docker.pkg.dev/${GOOGLE_PROJECT_ID}/circle-ci-app/circle-ci-app:latest"
+              echo "Building and pushing image: ${IMAGE_TAG}"
+              docker build -t "${IMAGE_TAG}" .
+              docker push "${IMAGE_TAG}"
 
   deploy_to_gke:
     executor: docker-executor

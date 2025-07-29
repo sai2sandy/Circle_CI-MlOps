@@ -1,71 +1,92 @@
+# .circleci/config.yml
+#
+# This is a corrected and improved version of your config.
+# It uses CircleCI orbs for GCP and GKE to simplify authentication and deployment.
+#
+# Required CircleCI Environment Variables:
+# - GCLOUD_SERVICE_KEY: The raw JSON key for your GCP service account.
+# - GOOGLE_PROJECT_ID: Your Google Cloud project ID.
+# - GKE_CLUSTER_NAME: The name of your GKE cluster.
+# - GKE_ZONE: The zone of your GKE cluster (e.g., us-central1-c).
+#
 version: 2.1
 
-executors:
-  docker-executor:
-    docker:
-      - image: google/cloud-sdk:latest
-    working_directory: ~/repo
+# Orbs are reusable packages that simplify complex configurations.
+orbs:
+  gcp-cli: circleci/gcp-cli@2.4.1
+  gke: circleci/gcp-gke@1.2.1
 
 jobs:
-  checkout_code:
-    executor: docker-executor
+  build-and-push:
+    # This job runs in a basic Docker container environment.
+    docker:
+      - image: cimg/base:stable
     steps:
       - checkout
-
-  build_docker_image:
-    executor: docker-executor
-    steps:
-      - checkout
-      - setup_remote_docker
+      # We need a remote Docker engine to build images.
+      - setup_remote_docker:
+          version: 20.10.14
+      
+      # Authenticate with Google Cloud using the gcp-cli orb.
+      - gcp-cli/install
+      - gcp-cli/auth:
+          gcloud-service-key: GCLOUD_SERVICE_KEY
       - run:
-          name: Authenticate with GCP
-          command: |
-              echo "$GCLOUD_SERVICE_KEY" | base64 --decode > gcp-key.json
-              gcloud auth activate-service-account --key-file=gcp-key.json
-              gcloud auth configure-docker us-central1-docker.pkg.dev || gcloud auth configure-docker
+          name: "Configure Docker with GCP Artifact Registry"
+          command: gcloud auth configure-docker us-central1-docker.pkg.dev
 
+      # Build and push the Docker image.
       - run:
-          name: Build and Push Docker Image
+          name: "Build and Push Docker Image"
           command: |
-              command: |
-                if [ -z "$GOOGLE_PROJECT_ID" ]; then
+            if [ -z "$GOOGLE_PROJECT_ID" ]; then
               echo "ERROR: GOOGLE_PROJECT_ID environment variable is not set."
               exit 1
-                fi
-              IMAGE_TAG="us-central1-docker.pkg.dev/${GOOGLE_PROJECT_ID}/circle-ci-app/circle-ci-app:latest"
-              echo "Building and pushing image: ${IMAGE_TAG}"
-              docker build -t "${IMAGE_TAG}" .
-              docker push "${IMAGE_TAG}"
+            fi
+            # Define the image tag using an environment variable for consistency.
+            export IMAGE_TAG="us-central1-docker.pkg.dev/${GOOGLE_PROJECT_ID}/circle-ci-app/circle-ci-app:${CIRCLE_SHA1}"
+            echo "Building and pushing image: ${IMAGE_TAG}"
+            docker build -t "${IMAGE_TAG}" .
+            docker push "${IMAGE_TAG}"
+            # Persist the image tag to the workspace so the deploy job can use it.
+            echo "export IMAGE_TAG=${IMAGE_TAG}" >> $BASH_ENV
 
-  deploy_to_gke:
-    executor: docker-executor
+  deploy:
+    # This job also runs in a basic Docker container.
+    docker:
+      - image: cimg/base:stable
     steps:
       - checkout
-      - setup_remote_docker
-      - run:
-          name: Authenticated into GCP
-          command: |
-              echo "$GCLOUD_SERVICE_KEY" | base64 --decode > gcp-key.json
-              gcloud auth activate-service-account --key-file=gcp-key.json
-              gcloud auth configure-docker us-central1-docker.pkg.dev || gcloud auth configure-docker
-      
-      - run:
-          name: Configure GKE
-          command: |
-              gcloud container clusters get-credentials $GKE_CLUSTER --region $GOOGLE_COMPUTE_REGION --project $GOOGLE_PROJECT_ID
-      - run:
-          name: Deploy to GKE
-          command: |
-              kubectl apply -f kubernetes-deployment.yaml
+      # Authenticate with Google Cloud.
+      - gcp-cli/install
+      - gcp-cli/auth:
+          gcloud-service-key: GCLOUD_SERVICE_KEY
 
+      # Install kubectl and connect to the GKE cluster using the gke orb.
+      - gke/install
+      - gke/init-kubectl:
+          cluster-name: GKE_CLUSTER_NAME
+          gke-zone: GKE_ZONE
+      
+      # Deploy the application to GKE.
+      # This assumes you have a 'kubernetes-deployment.yaml' file.
+      # It's a good practice to use a tool like 'sed' to update the image tag dynamically.
+      - run:
+          name: "Deploy to GKE"
+          command: |
+            echo "Deploying image: ${IMAGE_TAG}"
+            # Replace a placeholder in your yaml with the new image tag.
+            sed -i "s|IMAGE_PLACEHOLDER|${IMAGE_TAG}|g" kubernetes-deployment.yaml
+            echo "--- Updated kubernetes-deployment.yaml ---"
+            cat kubernetes-deployment.yaml
+            echo "----------------------------------------"
+            kubectl apply -f kubernetes-deployment.yaml
+
+# Workflows define the sequence of jobs.
 workflows:
-  version: 2
-  deploy_pipeline:
+  build-and-deploy-workflow:
     jobs:
-      - checkout_code
-      - build_docker_image:
+      - build-and-push
+      - deploy:
           requires:
-            - checkout_code
-      - deploy_to_gke:
-          requires:
-            - build_docker_image
+            - build-and-push
